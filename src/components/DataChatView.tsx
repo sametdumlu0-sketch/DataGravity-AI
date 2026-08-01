@@ -61,8 +61,9 @@ export const DataChatView: React.FC<DataChatViewProps> = ({
   ];
 
   return (
-    <div className="bg-slate-900/90 border border-slate-800 rounded-2xl flex flex-col h-[680px] shadow-lg overflow-hidden">
+    <div className="bg-slate-900/50 backdrop-blur-md border border-white/10 rounded-2xl flex flex-col h-[680px] shadow-2xl overflow-hidden">
       {/* Header */}
+
       <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/95 flex items-center justify-between">
         <div className="flex items-center space-x-3">
           <div className="p-2 bg-blue-500/10 border border-blue-500/20 rounded-xl text-blue-400">

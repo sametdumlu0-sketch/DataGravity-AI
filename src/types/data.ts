@@ -31,6 +31,12 @@ export interface ColumnInfo {
   sampleValues: (string | number | boolean | null)[];
 }
 
+export interface ExcelFileData {
+  filename: string;
+  buffer: ArrayBuffer;
+  sheetNames: string[];
+}
+
 export interface DatasetAnalysisContext {
   filename: string;
   rowCount: number;
@@ -41,6 +47,25 @@ export interface DatasetAnalysisContext {
   headRows: Record<string, any>[];
   allData: Record<string, any>[];
   contextMarkdown: string;
+  detectedEncoding?: string;
+  activeSheetName?: string;
+  availableSheets?: string[];
+  isSummarizedForLLM?: boolean;
+}
+
+export type ChartType = 'bar' | 'line' | 'pie' | 'area';
+
+export interface AIChartRecommendation {
+  id: string;
+  type: ChartType;
+  title: string;
+  description: string;
+  reasoning: string;
+  xAxisKey: string;
+  yAxisKey: string;
+  aggregateType?: 'sum' | 'avg' | 'count' | 'max' | 'min';
+  color?: string;
+  data: Record<string, any>[];
 }
 
 export interface SampleDataset {
@@ -66,3 +91,17 @@ export interface AnalysisSection {
   icon: string;
   content: string;
 }
+
+export interface SimulatorCoefficient {
+  driver: string;
+  target: string;
+  elasticity: number;
+  description: string;
+}
+
+export interface SimulatorResponse {
+  baselineStats: Record<string, number>;
+  coefficients: SimulatorCoefficient[];
+  insightSummary?: string;
+}
+

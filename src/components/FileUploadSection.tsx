@@ -2,26 +2,37 @@ import React, { useRef, useState } from 'react';
 import {
   Upload,
   FileSpreadsheet,
-  FileText,
   Sparkles,
   Database,
   ArrowRight,
   CheckCircle2,
   AlertCircle,
-  HelpCircle,
+  Layers,
+  Languages,
+  Zap,
 } from 'lucide-react';
 import { SAMPLE_DATASETS } from '../data/sampleDatasets';
-import { parseCSVString, parseExcelBuffer, parseJSONString } from '../utils/dataAnalyzer';
-import { DatasetAnalysisContext } from '../types/data';
+import {
+  parseCSVString,
+  parseCSVBuffer,
+  getExcelSheetNames,
+  parseExcelBuffer,
+  parseJSONString,
+} from '../utils/dataAnalyzer';
+import { DatasetAnalysisContext, ExcelFileData } from '../types/data';
+import { SmartAiLoader } from './SmartAiLoader';
+
 
 interface FileUploadSectionProps {
   onDatasetLoaded: (context: DatasetAnalysisContext) => void;
+  onDatasetsLoaded?: (contexts: DatasetAnalysisContext[]) => void;
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
 }
 
 export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
   onDatasetLoaded,
+  onDatasetsLoaded,
   isLoading,
   setIsLoading,
 }) => {
@@ -29,8 +40,62 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
   const [dragOver, setDragOver] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Multi-sheet Excel state
+  const [excelData, setExcelData] = useState<ExcelFileData | null>(null);
+  const [selectedSheetName, setSelectedSheetName] = useState<string>('');
+
+  const parseFileToContext = async (file: File): Promise<DatasetAnalysisContext> => {
+    const fileName = file.name;
+    const lowerName = fileName.toLowerCase();
+
+    if (lowerName.endsWith('.csv') || lowerName.endsWith('.txt')) {
+      const buffer = await file.arrayBuffer();
+      return parseCSVBuffer(buffer, fileName);
+    } else if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) {
+      const buffer = await file.arrayBuffer();
+      return parseExcelBuffer(buffer, fileName);
+    } else if (lowerName.endsWith('.json')) {
+      const text = await file.text();
+      return parseJSONString(text, fileName);
+    }
+    throw new Error(`Desteklenmeyen dosya: ${fileName}`);
+  };
+
+  const handleMultipleFilesProcess = async (files: File[]) => {
+    if (!files || files.length === 0) return;
+    setErrorMessage(null);
+    setIsLoading(true);
+
+    try {
+      const contexts: DatasetAnalysisContext[] = [];
+      for (const f of files) {
+        try {
+          const ctx = await parseFileToContext(f);
+          contexts.push(ctx);
+        } catch (e) {
+          console.warn('Failed to parse file:', f.name);
+        }
+      }
+
+      if (contexts.length > 0) {
+        if (onDatasetsLoaded) {
+          onDatasetsLoaded(contexts);
+        }
+        onDatasetLoaded(contexts[0]);
+      } else {
+        throw new Error('Seçilen dosyalar işlenemedi.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Çoklu dosya yükleme hatası.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+
   const handleFileProcess = async (file: File) => {
     setErrorMessage(null);
+    setExcelData(null);
     setIsLoading(true);
 
     try {
@@ -38,11 +103,22 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
       const lowerName = fileName.toLowerCase();
 
       if (lowerName.endsWith('.csv') || lowerName.endsWith('.txt')) {
-        const text = await file.text();
-        const context = parseCSVString(text, fileName);
+        const buffer = await file.arrayBuffer();
+        const context = parseCSVBuffer(buffer, fileName);
         onDatasetLoaded(context);
       } else if (lowerName.endsWith('.xlsx') || lowerName.endsWith('.xls')) {
         const buffer = await file.arrayBuffer();
+        const sheetNames = getExcelSheetNames(buffer);
+
+        if (sheetNames.length > 1) {
+          // Store Excel file for sheet selection UI
+          setExcelData({ filename: fileName, buffer, sheetNames });
+          setSelectedSheetName(sheetNames[0]);
+          setIsLoading(false);
+          return;
+        }
+
+        // Single sheet Excel fallback
         const context = parseExcelBuffer(buffer, fileName);
         onDatasetLoaded(context);
       } else if (lowerName.endsWith('.json')) {
@@ -60,6 +136,25 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
     }
   };
 
+  const handleConfirmSheetSelection = () => {
+    if (!excelData || !selectedSheetName) return;
+
+    setIsLoading(true);
+    setErrorMessage(null);
+
+    setTimeout(() => {
+      try {
+        const context = parseExcelBuffer(excelData.buffer, excelData.filename, selectedSheetName);
+        setExcelData(null);
+        onDatasetLoaded(context);
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Excel sayfası okunamadı.');
+      } finally {
+        setIsLoading(false);
+      }
+    }, 100);
+  };
+
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
@@ -70,6 +165,7 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
 
   const handleSampleClick = (sampleId: string) => {
     setErrorMessage(null);
+    setExcelData(null);
     setIsLoading(true);
     setTimeout(() => {
       try {
@@ -89,21 +185,104 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
   return (
     <div className="max-w-6xl mx-auto py-10 px-4 sm:px-6">
       {/* Hero Header */}
-      <div className="text-center max-w-3xl mx-auto mb-10 space-y-4">
-        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-semibold">
-          <Sparkles className="w-4 h-4 text-indigo-400 animate-pulse" />
-          <span>Python GeminiDataAnalyst Motoru ile Çalışır</span>
+      <div className="text-center max-w-4xl mx-auto mb-10 space-y-5">
+        <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-gradient-to-r from-indigo-500/15 via-purple-500/15 to-teal-500/15 border border-indigo-500/30 text-indigo-300 text-xs font-semibold shadow-inner">
+          <Sparkles className="w-4 h-4 text-amber-400 animate-pulse" />
+          <span>Gemini 3.6 Flash Enterprise Data Intelligence Engine</span>
         </div>
-        <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-100 tracking-tight leading-tight">
-          Verilerinizi Yükleyin, <br className="hidden sm:inline" />
-          <span className="bg-gradient-to-r from-indigo-400 via-blue-400 to-teal-300 bg-clip-text text-transparent">
-            Anında Yapay Zeka Raporu Alın
+        <h1 className="text-4xl sm:text-5xl font-extrabold text-slate-100 tracking-tight leading-tight">
+          Saniyeler İçinde <br className="hidden sm:inline" />
+          <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-teal-300 bg-clip-text text-transparent">
+            Verinizden Değer Üretin
           </span>
         </h1>
-        <p className="text-slate-400 text-sm sm:text-base leading-relaxed">
-          Gemini 3.6 Flash ile otomatik veri kalitesi kontrolü, kritik trendler, stratejik karar önerileri ve makine öğrenmesi modelleri keşfedin.
+        <p className="text-slate-400 text-sm sm:text-base leading-relaxed max-w-2xl mx-auto">
+          Karmaşık veri kümelerinizi yükleyin; Yönetici Özetleri, PowerPoint Sunumları (.pptx), What-If Simülasyonları, Kök Neden Analizi ve Multi-Agent AI Konseyi raporlarını anında oluşturun.
         </p>
+
+        {/* Live Feature Badges */}
+        <div className="flex flex-wrap justify-center gap-2 pt-2">
+          {[
+            '🎙️ 45s AI Podcast Özeti',
+            '📊 PowerPoint (.pptx) İndirme',
+            '🔮 What-If Senaryo Simülatörü',
+            '🤖 Multi-Agent AI Veri Konseyi',
+            '🕵️‍♂️ Kök Neden Analisti',
+            '💬 Doğal Dille Veri Düzenleyici',
+            '🧪 Sentetik Veri Çoğaltıcı',
+          ].map((badge) => (
+            <span
+              key={badge}
+              className="px-3 py-1 rounded-full bg-slate-900/60 backdrop-blur-md border border-white/10 text-slate-300 text-[11px] font-medium shadow-sm transition hover:border-indigo-500/40"
+            >
+              {badge}
+            </span>
+          ))}
+        </div>
       </div>
+
+
+      {/* Multi-Sheet Excel Selector Card */}
+      {excelData && (
+        <div className="mb-8 p-6 rounded-2xl bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border-2 border-indigo-500/40 shadow-2xl space-y-5 animate-fadeIn">
+          <div className="flex items-start space-x-4">
+            <div className="p-3 bg-emerald-500/20 border border-emerald-500/30 rounded-xl text-emerald-400">
+              <FileSpreadsheet className="w-7 h-7" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+                <span>Çok Sayfalı Excel Dosyası Algılandı</span>
+                <span className="text-xs px-2 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 font-mono">
+                  {excelData.sheetNames.length} Sayfa
+                </span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-1">
+                <span className="text-indigo-300 font-medium">{excelData.filename}</span> dosyasında birden fazla çalışma sayfası bulunmaktadır. Lütfen analiz etmek istediğiniz sayfayı seçin.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-center pt-2">
+            <div className="sm:col-span-2">
+              <label htmlFor="excel-sheet-select" className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Analiz Edilecek Çalışma Sayfası (Sheet):</span>
+              </label>
+              <select
+                id="excel-sheet-select"
+                value={selectedSheetName}
+                onChange={(e) => setSelectedSheetName(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl bg-slate-950/80 border border-indigo-500/40 text-slate-100 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+              >
+                {excelData.sheetNames.map((name) => (
+                  <option key={name} value={name} className="bg-slate-900 text-slate-100">
+                    📄 {name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center space-x-3 pt-4 sm:pt-5">
+              <button
+                type="button"
+                onClick={handleConfirmSheetSelection}
+                className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-semibold text-sm shadow-lg shadow-indigo-500/25 transition duration-200 flex items-center justify-center space-x-2"
+              >
+                <span>Sayfayı Analiz Et</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setExcelData(null)}
+                className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition"
+              >
+                İptal
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Upload Dropzone */}
       <div
@@ -117,20 +296,23 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
         className={`relative cursor-pointer rounded-2xl p-8 sm:p-12 text-center transition-all duration-300 border-2 border-dashed ${
           dragOver
             ? 'border-indigo-500 bg-indigo-500/10 shadow-2xl shadow-indigo-500/10 scale-[1.01]'
-            : 'border-slate-700 bg-slate-900/60 hover:border-indigo-500/60 hover:bg-slate-800/60'
+            : 'border-white/10 bg-slate-900/50 backdrop-blur-md hover:border-indigo-500/60 hover:bg-slate-900/70 shadow-2xl'
         }`}
       >
         <input
           type="file"
           ref={fileInputRef}
+          multiple
           onChange={(e) => {
-            if (e.target.files && e.target.files[0]) {
-              handleFileProcess(e.target.files[0]);
+            if (e.target.files && e.target.files.length > 0) {
+              const filesArray = Array.from(e.target.files);
+              handleMultipleFilesProcess(filesArray);
             }
           }}
           accept=".csv,.xlsx,.xls,.json,.txt"
           className="hidden"
         />
+
 
         <div className="flex flex-col items-center justify-center space-y-4">
           <div className="p-4 bg-indigo-600/15 border border-indigo-500/30 rounded-2xl text-indigo-400 shadow-inner">
@@ -147,25 +329,28 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-3 pt-2 text-xs text-slate-400">
-            <span className="inline-flex items-center gap-1">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> Otomatik Veri Tipi Tespiti
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-900/80 border border-slate-700 text-slate-300">
+              <Languages className="w-3.5 h-3.5 text-indigo-400" /> Otomatik Türkçe Kodlama Tespiti (ISO-8859-9 / UTF-8)
             </span>
-            <span className="inline-flex items-center gap-1">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> İstatistiksel Özet (`describe()`)
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800/90 border border-slate-700 text-slate-300">
+              <Layers className="w-3.5 h-3.5 text-teal-400" /> Çok Sayfalı Excel Desteği
             </span>
-            <span className="inline-flex items-center gap-1">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> %100 Güvenli Sunucu İşleme
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800/90 border border-slate-700 text-slate-300">
+              <Zap className="w-3.5 h-3.5 text-amber-400" /> Akıllı Gemini API Token Özetleyici
             </span>
           </div>
         </div>
 
         {isLoading && (
-          <div className="absolute inset-0 bg-slate-900/90 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center space-y-3">
-            <div className="w-8 h-8 border-3 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-            <p className="text-sm font-medium text-indigo-300">Veri seti inceleniyor ve özet istatistikler hesaplanıyor...</p>
+          <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md rounded-2xl flex items-center justify-center p-6 z-20">
+            <SmartAiLoader
+              title="Veri Kümesi İşleniyor & Analiz Ediliyor"
+              subtitle="Gemini 3.6 Flash veri kümenizin istatistiklerini ve şemasını çözümlüyor"
+            />
           </div>
         )}
       </div>
+
 
       {errorMessage && (
         <div className="mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-sm flex items-center space-x-3">

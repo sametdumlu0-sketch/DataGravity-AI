@@ -1,5 +1,5 @@
 {
-  "name": "Gemini Data Analyst - Yapay Zeka Veri Analisti",
+  "name": "DataGravity Analyst - Yapay Zeka Veri Analisti",
   "description": "Veri setlerini otomatik analiz eden, kritik bulgular, iş önerileri, ML modelleri çıkaran ve etkileşimli soruları yanıtlayan AI Veri Analisti.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
