@@ -28,6 +28,8 @@ interface FileUploadSectionProps {
   onDatasetsLoaded?: (contexts: DatasetAnalysisContext[]) => void;
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
+  engineMode: 'gemini' | 'python';
+  setEngineMode: (mode: 'gemini' | 'python') => void;
 }
 
 export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
@@ -35,6 +37,8 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
   onDatasetsLoaded,
   isLoading,
   setIsLoading,
+  engineMode,
+  setEngineMode,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -221,6 +225,84 @@ export const FileUploadSection: React.FC<FileUploadSectionProps> = ({
         </div>
       </div>
 
+      {/* Dual Engine Selection Cards */}
+      <div className="mb-8 max-w-4xl mx-auto space-y-3">
+        <div className="text-center">
+          <span className="text-xs font-extrabold uppercase tracking-wider text-slate-400">
+            1. Analiz Motorunuzu Seçin
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Card 1: Gemini AI Engine */}
+          <div
+            onClick={() => setEngineMode('gemini')}
+            className={`cursor-pointer rounded-2xl p-5 transition-all duration-300 border flex flex-col justify-between space-y-3 relative overflow-hidden ${
+              engineMode === 'gemini'
+                ? 'bg-gradient-to-br from-indigo-950/80 via-slate-900 to-slate-950 border-indigo-500 shadow-xl shadow-indigo-500/10 ring-2 ring-indigo-500/50'
+                : 'bg-slate-900/60 border-slate-800 hover:border-indigo-500/40 hover:bg-slate-900/90'
+            }`}
+          >
+            {engineMode === 'gemini' && (
+              <span className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-indigo-500 text-white text-[10px] font-extrabold uppercase tracking-wider">
+                Aktif Seçim
+              </span>
+            )}
+            <div className="flex items-center space-x-3">
+              <div className="p-3 bg-indigo-500/15 border border-indigo-500/30 rounded-xl text-indigo-400">
+                <Sparkles className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-100 flex items-center gap-2">
+                  🤖 Gemini 2.0 AI Motoru
+                </h3>
+                <span className="text-xs text-indigo-300 font-semibold">Büyük Dil Modeli Altyapısı</span>
+              </div>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Zengin Türkçe Yönetici Raporları, 45s Sesli Podcast Özeti, Stratejik İş Önerileri ve Multi-Agent AI Konseyi analizi sunar.
+            </p>
+            <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+              <span className="text-indigo-400 font-medium">Doğal Dil & Akıllı Raporlama</span>
+              <span className="text-slate-500">Gemini Flash</span>
+            </div>
+          </div>
+
+          {/* Card 2: Python Data Science Engine */}
+          <div
+            onClick={() => setEngineMode('python')}
+            className={`cursor-pointer rounded-2xl p-5 transition-all duration-300 border flex flex-col justify-between space-y-3 relative overflow-hidden ${
+              engineMode === 'python'
+                ? 'bg-gradient-to-br from-emerald-950/80 via-slate-900 to-slate-950 border-emerald-500 shadow-xl shadow-emerald-500/10 ring-2 ring-emerald-500/50'
+                : 'bg-slate-900/60 border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900/90'
+            }`}
+          >
+            {engineMode === 'python' && (
+              <span className="absolute top-3 right-3 px-2 py-0.5 rounded-full bg-emerald-500 text-white text-[10px] font-extrabold uppercase tracking-wider">
+                Aktif Seçim
+              </span>
+            )}
+            <div className="flex items-center space-x-3">
+              <div className="p-3 bg-emerald-500/15 border border-emerald-500/30 rounded-xl text-emerald-400">
+                <Zap className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-100 flex items-center gap-2">
+                  ⚡ Python Data Science Motoru
+                </h3>
+                <span className="text-xs text-emerald-300 font-semibold">Pandas, SciPy & Scikit-Learn</span>
+              </div>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Lokal anomali tespiti (IsolationForest), K-Means kümeleme, korelasyon matrisi ve %100 istatistiksel kesinlik. Kota sınırı yoktur.
+            </p>
+            <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px]">
+              <span className="text-emerald-400 font-medium">Sınırsız & Sıfır API Kotası</span>
+              <span className="text-slate-500">Lokal ML</span>
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Multi-Sheet Excel Selector Card */}
       {excelData && (

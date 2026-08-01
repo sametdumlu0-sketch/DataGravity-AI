@@ -38,6 +38,8 @@ interface NavbarProps {
   onOpenHistoryModal?: () => void;
   onOpenProModal?: () => void;
   onLogout?: () => void;
+  engineMode: 'gemini' | 'python';
+  setEngineMode: (mode: 'gemini' | 'python') => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -59,6 +61,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenHistoryModal,
   onOpenProModal,
   onLogout,
+  engineMode,
+  setEngineMode,
 }) => {
   const [showExportDropdown, setShowExportDropdown] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -116,6 +120,36 @@ export const Navbar: React.FC<NavbarProps> = ({
               <kbd className="px-2 py-0.5 rounded bg-white/10 text-[10px] font-mono text-slate-300 border border-white/10">
                 Ctrl K
               </kbd>
+            </button>
+          </div>
+
+          {/* DUAL ENGINE MODE SWITCHER PILL */}
+          <div className="flex items-center p-1 bg-slate-950/90 border border-slate-800 rounded-xl shadow-inner text-xs font-semibold">
+            <button
+              type="button"
+              onClick={() => setEngineMode('gemini')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition duration-200 ${
+                engineMode === 'gemini'
+                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Gemini 2.0 AI Altyapısı (Zengin Rapor, Podcast, Strateji)"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-indigo-300" />
+              <span>🤖 Gemini AI</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setEngineMode('python')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition duration-200 ${
+                engineMode === 'python'
+                  ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Lokal Python Motoru (Pandas/Scikit-Learn, Anomali Tespiti, Sınırsız)"
+            >
+              <Bot className="w-3.5 h-3.5 text-emerald-300" />
+              <span>⚡ Python ML</span>
             </button>
           </div>
 

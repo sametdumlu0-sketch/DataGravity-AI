@@ -44,7 +44,9 @@ interface ExecutiveReportViewProps {
   audioScript?: string | null;
   isLoading: boolean;
   onGenerateReport: (focusArea?: string) => void;
+  onGenerateOfflineReport?: () => void;
   onAskQuestionAboutSection?: (sectionTitle: string) => void;
+  isOfflineReport?: boolean;
 }
 
 
@@ -64,7 +66,9 @@ export const ExecutiveReportView: React.FC<ExecutiveReportViewProps> = ({
   audioScript,
   isLoading,
   onGenerateReport,
+  onGenerateOfflineReport,
   onAskQuestionAboutSection,
+  isOfflineReport = false,
 }) => {
   const [selectedFocus, setSelectedFocus] = useState<string>('Tümü');
   const [copied, setCopied] = useState(false);
@@ -198,16 +202,42 @@ export const ExecutiveReportView: React.FC<ExecutiveReportViewProps> = ({
               <Sparkles className="w-6 h-6" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
-                Otomatik Yönetici Raporu (Executive Summary)
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+                  Otomatik Yönetici Raporu (Executive Summary)
+                </h2>
+                {isOfflineReport ? (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-1">
+                    ⚡ Python Çevrimdışı ML Motoru
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 text-xs font-semibold flex items-center gap-1">
+                    🤖 Gemini 2.0 Flash AI
+                  </span>
+                )}
+              </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Gemini 3.6 Flash tarafından oluşturulan teknik ve stratejik iş analizi raporu.
+                {isOfflineReport
+                  ? 'Python (Pandas, SciPy, Scikit-Learn IsolationForest) ile %100 istatistiksel ve ML analizi.'
+                  : 'Gemini AI ve hibrit Python istatistik motoru tarafından hazırlanan teknik rapor.'}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {onGenerateOfflineReport && (
+              <button
+                type="button"
+                onClick={onGenerateOfflineReport}
+                disabled={isLoading}
+                title="API kotasından harcamadan anında Python ile istatistiksel ve ML analizi yapar."
+                className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 shadow-sm transition disabled:opacity-50"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                <span>⚡ Python Çevrimdışı Analiz Et</span>
+              </button>
+            )}
+
             {reportText && (
               <>
                 <button

@@ -157,13 +157,68 @@ function MainApp() {
     checkApiKeyStatus();
   }, []);
 
+  const [engineMode, setEngineMode] = useState<'gemini' | 'python'>('gemini');
+
+  const handleEngineModeChange = (newMode: 'gemini' | 'python') => {
+    setEngineMode(newMode);
+    if (datasetContext) {
+      if (newMode === 'python') {
+        generateOfflineExecutiveReport(datasetContext);
+      } else {
+        generateExecutiveReport(datasetContext);
+      }
+    }
+  };
+
   const handleDatasetLoaded = (context: DatasetAnalysisContext) => {
     setDatasetContext(context);
     setExecutiveReport(null);
     setReportError(null);
     setChatHistory([]);
     setActiveTab('report');
-    generateExecutiveReport(context);
+    if (engineMode === 'python') {
+      generateOfflineExecutiveReport(context);
+    } else {
+      generateExecutiveReport(context);
+    }
+  };
+
+  const [isOfflineReport, setIsOfflineReport] = useState<boolean>(false);
+
+  const generateOfflineExecutiveReport = async (ctxOverride?: DatasetAnalysisContext) => {
+    const ctx = ctxOverride || datasetContext;
+    if (!ctx) return;
+
+    setIsReportLoading(true);
+    setReportError(null);
+    try {
+      const response = await fetch('/api/offline-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          datasetContext: ctx,
+          dataContext: ctx.contextMarkdown,
+          allData: ctx.allData,
+          filename: ctx.filename,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Çevrimdışı rapor üretilemedi.');
+      }
+
+      setExecutiveReport(data.report);
+      setIsOfflineReport(true);
+      setAudioScript(data.audioScript || null);
+      addToast('success', 'Python Çevrimdışı Rapor Hazır ⚡', 'Python ML motoru ile %100 kesinlikte istatistiksel analiz üretildi.');
+    } catch (err: any) {
+      console.error('Offline report generation error:', err);
+      setReportError(err.message || 'Çevrimdışı rapor oluşturma sırasında bir hata oluştu.');
+      addToast('error', 'Çevrimdışı Analiz Hatası', err.message || 'Rapor oluşturulamadı.');
+    } finally {
+      setIsReportLoading(false);
+    }
   };
 
   const generateExecutiveReport = async (
@@ -181,6 +236,9 @@ function MainApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           dataContext: ctx.contextMarkdown,
+          datasetContext: ctx,
+          allData: ctx.allData,
+          filename: ctx.filename,
           focusArea,
         }),
       });
@@ -188,7 +246,6 @@ function MainApp() {
       const data = await response.json();
       if (!response.ok) {
         if (response.status === 429) {
-          // 429: Show friendly toast — server already retries with exponential backoff
           addToast('warning', 'Yapay Zeka Analisti Yoğun', 'İstek kuyruğa alındı, lütfen birkaç saniye bekleyin...');
         } else if (response.status === 401) {
           addToast('error', 'Geçersiz API Anahtarı', 'GEMINI_API_KEY doğrulanamadı.');
@@ -200,9 +257,14 @@ function MainApp() {
       }
 
       setExecutiveReport(data.report);
+      setIsOfflineReport(!!data.isOffline);
       setReportError(null);
       setAudioScript(data.audioScript || null);
-      addToast('success', 'Rapor Hazır', 'Yönetici özeti başarıyla oluşturuldu.');
+      addToast(
+        'success',
+        data.isOffline ? 'Python Çevrimdışı Raporu Devrede ⚡' : 'Rapor Hazır',
+        data.isOffline ? 'API sınırları nedeniyle Python ML motoru ile rapor üretildi.' : 'Yönetici özeti başarıyla oluşturuldu.'
+      );
 
       // Auto-save to user history if logged in
       if (authToken && ctx) {
@@ -334,6 +396,8 @@ function MainApp() {
         onOpenHistoryModal={() => setIsHistoryModalOpen(true)}
         onOpenProModal={() => setIsProModalOpen(true)}
         onLogout={handleLogout}
+        engineMode={engineMode}
+        setEngineMode={handleEngineModeChange}
       />
 
       {/* Command Palette Modal (Ctrl + K) */}
@@ -342,6 +406,11 @@ function MainApp() {
         onClose={() => setIsCommandPaletteOpen(false)}
         onSelectTab={setActiveTab}
         onResetDataset={handleReset}
+        onTriggerPPTXExport={
+          executiveReport
+            ? () => downloadPPTXPresentation(executiveReport, `${datasetContext?.filename || 'rapor'}_sunum.pptx`, datasetContext?.filename)
+            : undefined
+        }
       />
 
       {/* Jarvis Voice Assistant Modal */}
@@ -387,8 +456,16 @@ function MainApp() {
         {!datasetContext ? (
           <FileUploadSection
             onDatasetLoaded={handleDatasetLoaded}
+            onDatasetsLoaded={(contexts) => {
+              // İlk veri setini ana context olarak yükle; Knowledge Graph için hepsi context içinde
+              if (contexts && contexts.length > 0) {
+                handleDatasetLoaded(contexts[0]);
+              }
+            }}
             isLoading={isReportLoading}
             setIsLoading={setIsReportLoading}
+            engineMode={engineMode}
+            setEngineMode={handleEngineModeChange}
           />
         ) : (
           <div className="space-y-6">
@@ -412,6 +489,8 @@ function MainApp() {
                     audioScript={audioScript}
                     isLoading={isReportLoading}
                     onGenerateReport={(focus) => generateExecutiveReport(datasetContext, focus)}
+                    onGenerateOfflineReport={() => generateOfflineExecutiveReport(datasetContext)}
+                    isOfflineReport={isOfflineReport}
                     onAskQuestionAboutSection={handleAskQuestionFromReport}
                   />
                 )}
@@ -438,7 +517,7 @@ function MainApp() {
 
       {/* Footer */}
       <footer className="py-4 border-t border-white/10 bg-[#07090E] text-center text-xs text-slate-500">
-        <span>DataGravity Analyst • Professional Data Analytics & Gemini 3.6 Flash</span>
+        <span>DataGravity Analyst • Professional Data Analytics & Gemini 2.0 Flash</span>
       </footer>
     </div>
   );
