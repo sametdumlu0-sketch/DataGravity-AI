@@ -27,6 +27,20 @@
   .glow-emerald {
     box-shadow: 0 0 30px rgba(16, 185, 129, 0.2);
   }
+
+  /* Scrollbar utility — kullanıldığı yer: Navbar sub-bar tab listesi */
+  .scrollbar-none {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Fade-in animation — kullanıldığı yer: dropdown menüler, modal overlay */
+  .animate-fadeIn {
+    animation: fadeIn 0.18s ease-out both;
+  }
 }
 
 @keyframes spinSlow {
@@ -35,6 +49,17 @@
   }
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 

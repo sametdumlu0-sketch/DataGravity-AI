@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { spawn } from 'child_process';
 
 dotenv.config();
 
@@ -13,7 +14,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'datagravity_analyst_secret_jwt_key_2026';
 
 app.use(express.json({ limit: '20mb' }));
@@ -59,13 +60,16 @@ function getAllApiKeys(): string[] {
   if (process.env.GEMINI_API_KEY_3 && process.env.GEMINI_API_KEY_3 !== 'MY_GEMINI_API_KEY') {
     keys.push(process.env.GEMINI_API_KEY_3);
   }
+  if (process.env.GEMINI_API_KEY_4 && process.env.GEMINI_API_KEY_4 !== 'MY_GEMINI_API_KEY') {
+    keys.push(process.env.GEMINI_API_KEY_4);
+  }
 
   // Fallback to .streamlit/secrets.toml
   try {
     const secretsPath = path.join(process.cwd(), '.streamlit', 'secrets.toml');
     if (fs.existsSync(secretsPath)) {
       const secretsContent = fs.readFileSync(secretsPath, 'utf8');
-      const match = secretsContent.match(/GEMINI_API_KEY\s*=\s*["']([^"']+)["']/);
+      const match = secretsContent.match(/GEMINI_API_KEY\s*=\s*["']([^"']+)['"]/);
       if (match && match[1] && !keys.includes(match[1])) {
         keys.push(match[1]);
       }
@@ -103,47 +107,146 @@ function rotateApiKeyIndex() {
   }
 }
 
+// ============================================================
+// GLOBAL REQUEST QUEUE — Concurrent istekleri sıraya koyar,
+// rate limit riskini kökten azaltır.
+// gemini-2.0-flash free-tier: 15 RPM → 1 istek / 4 saniye
+// ============================================================
+let _queueRunning = false;
+const _requestQueue: Array<() => Promise<void>> = [];
+let _last429At = 0;          // Son 429 hatası zamanı (ms)
+const INTER_REQ_DELAY = 4000; // İstekler arası minimum bekleme (ms)
+const COOLDOWN_MS = 65000;    // 429 sonrası global cooldown (ms)
+
+async function _processQueue() {
+  if (_queueRunning) return;
+  _queueRunning = true;
+  while (_requestQueue.length > 0) {
+    // Eğer kısa süre önce 429 aldıysak, cooldown uygula
+    const timeSince429 = Date.now() - _last429At;
+    if (_last429At > 0 && timeSince429 < COOLDOWN_MS) {
+      const remaining = COOLDOWN_MS - timeSince429;
+      console.log(`[Queue] Kota doldu — ${Math.ceil(remaining / 1000)}s cooldown bekleniyor...`);
+      await new Promise((r) => setTimeout(r, remaining));
+      _last429At = 0;
+    }
+
+    const task = _requestQueue.shift()!;
+    await task();
+
+    // Her istek arasında bekleme (15 RPM limitine uyum)
+    if (_requestQueue.length > 0) {
+      await new Promise((r) => setTimeout(r, INTER_REQ_DELAY));
+    }
+  }
+  _queueRunning = false;
+}
+
+function enqueueGeminiRequest<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    _requestQueue.push(async () => {
+      try {
+        resolve(await fn());
+      } catch (e) {
+        reject(e);
+      }
+    });
+    _processQueue();
+  });
+}
+
+// Aktif model — gemini-2.0-flash: @google/genai v1beta API ile uyumlu
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
 /**
- * Executes a Gemini API call with exponential backoff & Key Rotation on 429 Rate Limit errors.
+ * Gemini API çağrısını kuyruk + exponential backoff + Key Rotation ile yürütür.
+ * 429 Rate Limit hatasında global cooldown başlatır ve sonraki anahtara geçer.
  */
 async function callGeminiWithRetry<T>(
   fn: (ai: GoogleGenAI) => Promise<T>,
-  maxRetries = 3,
-  delayMs = 2000
+  maxRetries = 4,
+  delayMs = 5000
 ): Promise<T> {
-  let attempt = 0;
-  let lastErr: any = null;
+  return enqueueGeminiRequest(async () => {
+    let attempt = 0;
+    let lastErr: any = null;
 
-  while (attempt < maxRetries) {
-    try {
-      const ai = getGenAIClient();
-      return await fn(ai);
-    } catch (err: any) {
-      lastErr = err;
-      const msg = err?.message || '';
-      const isRateLimit =
-        msg.includes('429') ||
-        msg.includes('RESOURCE_EXHAUSTED') ||
-        msg.includes('Quota') ||
-        msg.includes('rate limit');
+    while (attempt <= maxRetries) {
+      try {
+        const ai = getGenAIClient();
+        return await fn(ai);
+      } catch (err: any) {
+        lastErr = err;
+        const msg = err?.message || '';
+        const isRateLimit =
+          msg.includes('429') ||
+          msg.includes('RESOURCE_EXHAUSTED') ||
+          msg.includes('Quota') ||
+          msg.includes('rate limit') ||
+          msg.includes('rateLimitExceeded');
 
-      if (isRateLimit && attempt < maxRetries - 1) {
-        attempt++;
-        rotateApiKeyIndex();
-        console.warn(
-          `[Gemini 429 Rate Limit] Attempt ${attempt}/${maxRetries} failed. Waiting ${delayMs}ms before retry...`
-        );
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        delayMs *= 1.5;
-      } else {
-        throw err;
+        if (isRateLimit && attempt < maxRetries) {
+          attempt++;
+          _last429At = Date.now(); // Cooldown tetikle
+          rotateApiKeyIndex();
+          const waitMs = attempt <= 1 ? 8000 : Math.min(60000, delayMs * Math.pow(2, attempt - 1));
+          const keys = getAllApiKeys();
+          console.warn(
+            `[Rate Limit] 429 — Anahtar #${(activeKeyIndex % keys.length) + 1}/${keys.length}'e geçildi. ` +
+            `Deneme ${attempt}/${maxRetries}. ${Math.round(waitMs / 1000)}s bekleniyor...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+        } else {
+          throw lastErr;
+        }
       }
     }
-  }
-
-  throw lastErr;
+    throw lastErr;
+  });
 }
 
+// Helper: Run Python Offline Data Science Analysis Engine
+async function runPythonOfflineAnalysis(payload: any): Promise<any> {
+  const pythonBinWin = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+  const pythonBinUnix = path.join(process.cwd(), '.venv', 'bin', 'python');
+  let pythonExe = 'python';
+
+  if (fs.existsSync(pythonBinWin)) {
+    pythonExe = pythonBinWin;
+  } else if (fs.existsSync(pythonBinUnix)) {
+    pythonExe = pythonBinUnix;
+  }
+
+  const scriptPath = path.join(process.cwd(), 'python_engine', 'analyzer.py');
+
+  return new Promise((resolve, reject) => {
+    const pyProcess = spawn(pythonExe, [scriptPath]);
+    let output = '';
+    let errorOutput = '';
+
+    pyProcess.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    pyProcess.stderr.on('data', (chunk) => {
+      errorOutput += chunk.toString();
+    });
+
+    pyProcess.on('close', (code) => {
+      if (code !== 0 && !output) {
+        return reject(new Error(`Python betiği hata ile kapandı (kod ${code}): ${errorOutput}`));
+      }
+      try {
+        const parsed = JSON.parse(output);
+        resolve(parsed);
+      } catch (e) {
+        reject(new Error(`Python JSON çıktısı ayrıştırılamadı: ${output.substring(0, 300)}`));
+      }
+    });
+
+    pyProcess.stdin.write(JSON.stringify(payload));
+    pyProcess.stdin.end();
+  });
+}
 
 // Global API Error Handler
 function handleApiError(err: any, res: express.Response) {
@@ -252,7 +355,7 @@ Lütfen yukarıdaki verileri detaylıca inceleyerek hem raporu hem de 45 saniyel
 
     const response = await callGeminiWithRetry(async (ai) => {
       return await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: {
           systemInstruction,
@@ -276,7 +379,37 @@ Lütfen yukarıdaki verileri detaylıca inceleyerek hem raporu hem de 45 saniyel
       res.json({ report: response.text || 'Analiz raporu oluşturulamadı.', audioScript: null });
     }
   } catch (err: any) {
-    handleApiError(err, res);
+    console.warn('Gemini API /api/analyze yanıt vermedi veya kota doldu. Python Çevrimdışı Analiz Motoruna otomatik geçiliyor...', err?.message || err);
+    try {
+      const { dataContext, datasetContext, allData, filename } = req.body;
+      const payload = datasetContext || {
+        contextMarkdown: dataContext,
+        allData: allData || [],
+        filename: filename || 'Veri Seti'
+      };
+      const offlineResult = await runPythonOfflineAnalysis(payload);
+      return res.json(offlineResult);
+    } catch (pyErr: any) {
+      console.error('Python çevrimdışı fallback de başarısız:', pyErr.message);
+      handleApiError(err, res);
+    }
+  }
+});
+
+// Endpoint: Direct Offline Python Data Science & ML Analysis Engine
+app.post('/api/offline-analyze', async (req, res) => {
+  try {
+    const { datasetContext, dataContext, allData, filename } = req.body;
+    const payload = datasetContext || {
+      contextMarkdown: dataContext,
+      allData: allData || [],
+      filename: filename || 'Veri Seti'
+    };
+    const result = await runPythonOfflineAnalysis(payload);
+    res.json(result);
+  } catch (err: any) {
+    console.error('Offline Python Analysis Error:', err);
+    res.status(500).json({ error: `Python çevrimdışı analiz hatası: ${err.message}` });
   }
 });
 
@@ -329,7 +462,7 @@ ${dataContext}
 
     const response = await callGeminiWithRetry(async (ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: {
           systemInstruction,
@@ -349,7 +482,12 @@ ${dataContext}
       res.status(500).json({ error: 'Grafik önerileri JSON formatında ayrıştırılamadı.' });
     }
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'recommend_charts' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -389,7 +527,7 @@ Lütfen yukarıdaki veri seti şemasına uygun çalıştırılabilir Python ve P
 
     const response = await callGeminiWithRetry(async (ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: {
           systemInstruction,
@@ -401,7 +539,12 @@ Lütfen yukarıdaki veri seti şemasına uygun çalıştırılabilir Python ve P
     const codeText = response.text || 'Python kodu oluşturulamadı.';
     res.json({ code: codeText });
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'generate_python' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -440,7 +583,7 @@ Lütfen yukarıdaki isteği tam karşılayan optimize edilmiş SQL sorgusunu ve 
 
     const response = await callGeminiWithRetry(async (ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: {
           systemInstruction,
@@ -452,7 +595,12 @@ Lütfen yukarıdaki isteği tam karşılayan optimize edilmiş SQL sorgusunu ve 
     const sqlText = response.text || 'SQL sorgusu oluşturulamadı.';
     res.json({ sql: sqlText });
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'generate_sql' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -504,14 +652,16 @@ ${dataContext}
 ${numericStats ? `\nSayısal İstatistikler:\n${JSON.stringify(numericStats, null, 2)}` : ''}
     `.trim();
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        temperature: 0.2,
-      },
-    });
+    const response = await callGeminiWithRetry(async (ai) =>
+      ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          temperature: 0.2,
+        },
+      })
+    );
 
     let rawText = response.text || '{}';
     rawText = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -524,7 +674,12 @@ ${numericStats ? `\nSayısal İstatistikler:\n${JSON.stringify(numericStats, nul
       res.status(500).json({ error: 'Senaryo katsayıları JSON formatında ayrıştırılamadı.' });
     }
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'simulate' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -573,7 +728,7 @@ Lütfen yukarıdaki komutu tam karşılayan JavaScript 'rows' dönüştürme kod
 
     const response = await callGeminiWithRetry(async (ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: {
           systemInstruction,
@@ -655,7 +810,7 @@ Lütfen kendi uzmanlık rolün çerçevesinde veriyi detaylıca analiz et ve gö
     // Run 3 Agent LLM calls sequentially to avoid concurrent 429 errors (rate limit friendly)
     const dsRes = await callGeminiWithRetry((ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: { systemInstruction: dsInstruction, temperature: 0.2 },
       })
@@ -664,7 +819,7 @@ Lütfen kendi uzmanlık rolün çerçevesinde veriyi detaylıca analiz et ve gö
     await new Promise((r) => setTimeout(r, 800));
     const bsRes = await callGeminiWithRetry((ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: { systemInstruction: bsInstruction, temperature: 0.2 },
       })
@@ -672,7 +827,7 @@ Lütfen kendi uzmanlık rolün çerçevesinde veriyi detaylıca analiz et ve gö
     await new Promise((r) => setTimeout(r, 800));
     const daRes = await callGeminiWithRetry((ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: { systemInstruction: daInstruction, temperature: 0.2 },
       })
@@ -722,7 +877,12 @@ Lütfen kendi uzmanlık rolün çerçevesinde veriyi detaylıca analiz et ve gö
       councilSummary: `Veri Konseyi 3 farklı perspektiften değerlendirmesini tamamladı. Veri Kalite Skoru: %${qualityScore}.`,
     });
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'council' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -782,14 +942,16 @@ ${dataContext}
 ${numericStats ? `\nSayısal İstatistikler:\n${JSON.stringify(numericStats, null, 2)}` : ''}
     `.trim();
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        temperature: 0.2,
-      },
-    });
+    const response = await callGeminiWithRetry(async (ai) =>
+      ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          temperature: 0.2,
+        },
+      })
+    );
 
     let rawText = response.text || '{}';
     rawText = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -802,7 +964,12 @@ ${numericStats ? `\nSayısal İstatistikler:\n${JSON.stringify(numericStats, nul
       res.status(500).json({ error: 'Kök neden analizi JSON formatında ayrıştırılamadı.' });
     }
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'root_cause' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -849,14 +1016,16 @@ Hedef Üretilecek Sentetik Satır Sayısı: ${targetCount}
 Lütfen yukarıdaki istatistiksel dağılıma sadık kalarak gerçekçi sentetik veri nesnelerini içeren JSON dizisini üret:
     `.trim();
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        temperature: 0.4,
-      },
-    });
+    const response = await callGeminiWithRetry(async (ai) =>
+      ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          temperature: 0.4,
+        },
+      })
+    );
 
     let rawText = response.text || '[]';
     rawText = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -897,7 +1066,12 @@ Lütfen yukarıdaki istatistiksel dağılıma sadık kalarak gerçekçi sentetik
       samplePrototypesCount: prototypes.length,
     });
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const syntheticRows = await runPythonOfflineAnalysis({ ...req.body, action: 'generate_synthetic_data' });
+      return res.json({ syntheticRows, count: syntheticRows.length, samplePrototypesCount: syntheticRows.length });
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -953,14 +1127,16 @@ ${JSON.stringify(sampleRows, null, 2)}
 Lütfen veri doktoru teşhisini, sağlık skorunu, denetim kaydını (auditLogs) ve düzeltilmiş satırları (cleanedRows) içeren JSON objesini üret:
     `.trim();
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        temperature: 0.1,
-      },
-    });
+    const response = await callGeminiWithRetry(async (ai) =>
+      ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          temperature: 0.1,
+        },
+      })
+    );
 
     let rawText = response.text || '{}';
     rawText = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -973,7 +1149,12 @@ Lütfen veri doktoru teşhisini, sağlık skorunu, denetim kaydını (auditLogs)
       res.status(500).json({ error: 'Veri doktoru yanıtı JSON formatında ayrıştırılamadı.' });
     }
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'data_doctor' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -1024,14 +1205,16 @@ ${JSON.stringify(sampleRows?.slice(0, 3) || [], null, 2)}
 Lütfen canlı ML model mimarisini ve API kod örneklerini içeren JSON objesini üret:
     `.trim();
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        temperature: 0.2,
-      },
-    });
+    const response = await callGeminiWithRetry(async (ai) =>
+      ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          temperature: 0.2,
+        },
+      })
+    );
 
     let rawText = response.text || '{}';
     rawText = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -1057,7 +1240,7 @@ app.post('/api/predict-model', async (req, res) => {
       return res.status(400).json({ error: 'Tahmin yapılacak girdi verisi (inputData) gereklidir.' });
     }
 
-    const ai = getGenAIClient();
+
 
     const systemInstruction = `
 Sen canlı çalışan bir Makine Öğrenmesi (ML) Tahmin Motorusun.
@@ -1083,14 +1266,16 @@ ${JSON.stringify(inputData, null, 2)}
 Lütfen anlık ML canlı tahmin sonucunu ve önerilen aksiyonu içeren JSON objesini üret:
     `.trim();
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        temperature: 0.2,
-      },
-    });
+    const response = await callGeminiWithRetry(async (ai) =>
+      ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          temperature: 0.2,
+        },
+      })
+    );
 
     let rawText = response.text || '{}';
     rawText = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -1103,7 +1288,12 @@ Lütfen anlık ML canlı tahmin sonucunu ve önerilen aksiyonu içeren JSON obje
       res.status(500).json({ error: 'Tahmin yanıtı JSON formatında ayrıştırılamadı.' });
     }
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'predict_model' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -1142,14 +1332,16 @@ ${reportText}
 Lütfen dağıtım mesajını içeren JSON objesini üret:
     `.trim();
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        temperature: 0.2,
-      },
-    });
+    const response = await callGeminiWithRetry(async (ai) =>
+      ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: prompt,
+        config: {
+          systemInstruction,
+          temperature: 0.2,
+        },
+      })
+    );
 
     let rawText = response.text || '{}';
     rawText = rawText.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -1247,7 +1439,7 @@ Yanıtını veriye tam sadık kalarak, mantıksal ve adım adım adımları aç�
 
     const response = await callGeminiWithRetry(async (ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: {
           systemInstruction,
@@ -1259,7 +1451,12 @@ Yanıtını veriye tam sadık kalarak, mantıksal ve adım adım adımları aç�
     const answerText = response.text || 'Sorunuza bir yanıt alınamadı.';
     res.json({ answer: answerText });
   } catch (err: any) {
-    handleApiError(err, res);
+    try {
+      const offlineRes = await runPythonOfflineAnalysis({ ...req.body, action: 'ask' });
+      return res.json(offlineRes);
+    } catch (pyErr) {
+      handleApiError(err, res);
+    }
   }
 });
 
@@ -1311,7 +1508,7 @@ Lütfen bu tablolar arasındaki ortak anlamsal ilişkileri (Primary Key / Foreig
 
     const response = await callGeminiWithRetry(async (ai) =>
       ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model: GEMINI_MODEL,
         contents: prompt,
         config: {
           temperature: 0.1,
